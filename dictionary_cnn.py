@@ -16,6 +16,7 @@ from data import MVTecDataset
 import argparse
 from pathlib import Path
 import cv2
+import time
 
 
 class ImageDataset(Dataset):
@@ -37,10 +38,10 @@ class ImageDataset(Dataset):
         return img
 
 class Extract_feature_map():
-    def __init__(self, model_name='resnet50', pool_last=False) -> None:
+    def __init__(self, model_name='resnet50', pool_last=False, layer_indices:list=[2]) -> None:
         
         # ResNet50のプーリング層の位置を指定
-        self.layer_indices = (1, 2, 3)
+        self.layer_indices = layer_indices
         self.model = timm.create_model(model_name, pretrained=True,features_only=True,out_indices=self.layer_indices)
         for param in self.model.parameters():
             param.requires_grad = False
@@ -97,7 +98,7 @@ def main(arg_dict:dict):
     # 学習フェイズ
     cls = arg_dict['class']
 
-    extracter = Extract_feature_map(model_name=arg_dict['backbone'])
+    extracter = Extract_feature_map(model_name=arg_dict['backbone'],layer_indices=[2])
 
     batch_size = arg_dict['batch_size']
 
@@ -118,38 +119,42 @@ def main(arg_dict:dict):
     output_dir = Path('res')
     output_dir = output_dir.joinpath(timestamp,cls)
 
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-
-
     if arg_dict['dictionary_path'] is None:
 
         dictionary = MiniBatchDictionaryLearning(n_components=arg_dict['n_components'], alpha=1.0,\
-                                                max_iter=1,transform_algorithm='lasso_lars',\
+                                                max_iter=1,transform_algorithm=arg_dict['transform_algorithm'],\
                                                 n_jobs=arg_dict['n_jobs'],batch_size=arg_dict['dict_batchsize'],
                                                 random_state=arg_dict['seed'])
 
         train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
 
+        time_sum = 0
         for epoch in range(arg_dict['epoch']):
-            loss_epoch = 0
+            time_start = time.perf_counter()
             for images,_ in tqdm(train_dataloader,total=len(train_dataloader),leave=False,desc="Epoch {}".format(epoch)):
                 feature_map = extracter.extract_feature_map(images)
                 feature_map_np = feature_map.detach().numpy().astype(np.float64)
                 dictionary.partial_fit(feature_map_np)
 
-                sparse_codes = dictionary.transform(feature_map_np)
-                reconstructed_patches = np.dot(sparse_codes, dictionary.components_)
+                # sparse_codes = dictionary.transform(feature_map_np)
+                # reconstructed_patches = np.dot(sparse_codes, dictionary.components_)
 
-                loss = np.mean(np.sqrt((feature_map_np - reconstructed_patches)**2))
-                loss_epoch += loss
+                # loss = np.mean(np.sqrt((feature_map_np - reconstructed_patches)**2))
+                # loss_epoch += loss
 
-            print('Epoch {} Loss: {}'.format(epoch, loss_epoch/len(train_dataloader)))
+            # print('Epoch {} Loss: {}'.format(epoch, loss_epoch/len(train_dataloader)))
 
+            time_fin = time.perf_counter()
+            time_sum += (time_fin - time_start)
+        
+        print('Train Time', time_sum ,'sec')
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
         joblib.dump(dictionary, output_dir.joinpath('dictionary_model.pkl'))
 
     else:
-        dictionary = joblib.load(arg_dict['dictionary_path'])
+        # dictionary = joblib.load(arg_dict['dictionary_path'])
+        raise ValueError('Errorcode : 1')
 
 
     # 検証フェイズ
@@ -175,7 +180,8 @@ def main(arg_dict:dict):
 
         anomaly_vec = np.mean(np.sqrt((feature_map_np - reconstructed_patches)**2),axis=1)
 
-        anomaly_map = anomaly_vec.reshape(arg_dict['size']//4,arg_dict['size']//4)
+        map_shape = int(np.sqrt(anomaly_vec.shape[0]))
+        anomaly_map = anomaly_vec.reshape(map_shape,map_shape)
         anomaly_map = cv2.resize(anomaly_map,(arg_dict['size'],arg_dict['size']),cv2.INTER_LINEAR)
 
 
@@ -219,6 +225,7 @@ def parse_arguments():
     parser.add_argument("--seed", type=int, default=42, help="randam seed")
     parser.add_argument("--backbone", type=str, default='resnet18', help='backbone model name')
     parser.add_argument("--n_components",type=int, default=100)
+    parser.add_argument("--transform_algorithm",type=str, default='omp')
     return parser.parse_args()
 
 if __name__ == '__main__':
