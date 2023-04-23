@@ -17,6 +17,21 @@ import argparse
 from pathlib import Path
 import cv2
 import time
+import random
+import sys
+from contextlib import redirect_stdout
+
+def set_random_seed(seed_value):
+    random.seed(seed_value)
+    np.random.seed(seed_value)
+    torch.manual_seed(seed_value)
+    
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(seed_value)
+        torch.cuda.manual_seed_all(seed_value)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+
 
 
 class ImageDataset(Dataset):
@@ -208,8 +223,9 @@ def main(arg_dict:dict):
     image_rocauc = roc_auc_score(image_labels, image_preds)
     pixel_rocauc = roc_auc_score(pixel_labels, pixel_preds)
 
-    print('Image ROC AUC:',image_rocauc)
-    print('Pixel ROC AUC', pixel_rocauc)
+    with open(output_dir.joinpath('metrix.txt'),'w') as file, redirect_stdout(file):
+        print('Image ROC AUC:',image_rocauc)
+        print('Pixel ROC AUC:', pixel_rocauc)
 
 
 def parse_arguments():
@@ -231,4 +247,5 @@ def parse_arguments():
 if __name__ == '__main__':
     args = parse_arguments()
     arg_dict = vars(args)
+    set_random_seed(arg_dict['seed'])
     main(arg_dict)
