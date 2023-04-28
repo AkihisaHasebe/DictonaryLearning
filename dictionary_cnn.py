@@ -20,6 +20,7 @@ import time
 import random
 import sys
 from contextlib import redirect_stdout
+import pandas as pd
 
 def set_random_seed(seed_value):
     random.seed(seed_value)
@@ -142,29 +143,61 @@ def main(arg_dict:dict):
                                                 random_state=arg_dict['seed'])
 
         train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+        val_dataloader = DataLoader(val_dataset, batch_size=1, shuffle=False)
+        dict_metrix = {'epoch':[],'image_ROCAUC':[], 'pixel_ROCAUC':[]}
 
-        time_sum = 0
-        for epoch in range(arg_dict['epoch']):
-            time_start = time.perf_counter()
-            for images,_ in tqdm(train_dataloader,total=len(train_dataloader),leave=False,desc="Epoch {}".format(epoch)):
+        for epoch in tqdm(range(arg_dict['epoch'])):
+            # Train
+            for images,_ in tqdm(train_dataloader,total=len(train_dataloader),leave=False,desc="Epoch{}_Train".format(epoch)):
                 feature_map = extracter.extract_feature_map(images)
                 feature_map_np = feature_map.detach().numpy().astype(np.float64)
                 dictionary.partial_fit(feature_map_np)
 
-                # sparse_codes = dictionary.transform(feature_map_np)
-                # reconstructed_patches = np.dot(sparse_codes, dictionary.components_)
+            image_preds = []
+            pixel_preds = []
+            image_labels = []
+            pixel_labels = []
+            # Validation
+            for i, (images, mask, label) in tqdm(enumerate(val_dataloader),total=len(val_dataloader),leave=False, desc="Epoch{}_Valid".format(epoch)):
+                # 特徴マップの抽出
+                feature_map = extracter.extract_feature_map(images)
+                feature_map_np = feature_map.detach().numpy().astype(np.float64)
 
-                # loss = np.mean(np.sqrt((feature_map_np - reconstructed_patches)**2))
-                # loss_epoch += loss
+                # パッチ抽出
+                # patches = extract_patches_2d(feature_map_np, patch_size)
 
-            # print('Epoch {} Loss: {}'.format(epoch, loss_epoch/len(train_dataloader)))
+                # スパース表現
+                sparse_codes = dictionary.transform(feature_map_np)
 
-            time_fin = time.perf_counter()
-            time_sum += (time_fin - time_start)
-        
-        print('Train Time', time_sum ,'sec')
-        if not os.path.exists(output_dir):
-            os.makedirs(output_dir)
+                # 再構成
+                reconstructed_patches = np.dot(sparse_codes, dictionary.components_)
+
+                anomaly_vec = np.mean(np.sqrt((feature_map_np - reconstructed_patches)**2),axis=1)
+
+                map_shape = int(np.sqrt(anomaly_vec.shape[0]))
+                anomaly_map = anomaly_vec.reshape(map_shape,map_shape)
+                anomaly_map = cv2.resize(anomaly_map,(arg_dict['size'],arg_dict['size']),cv2.INTER_LINEAR)
+
+                image_preds.append(np.max(anomaly_map))
+                pixel_preds.extend(anomaly_map.flatten())
+                image_labels.append(label)
+                pixel_labels.extend(mask.flatten().numpy())
+
+            image_labels = np.stack(image_labels)
+            image_preds = np.stack(image_preds)
+
+            image_rocauc = roc_auc_score(image_labels, image_preds)
+            pixel_rocauc = roc_auc_score(pixel_labels, pixel_preds)
+
+            if not os.path.exists(output_dir):
+                os.makedirs(output_dir)
+            
+            dict_metrix['epoch'].append(epoch)
+            dict_metrix['image_ROCAUC'].append(image_rocauc)
+            dict_metrix['pixel_ROCAUC'].append(pixel_rocauc)
+
+        df_metrix = pd.DataFrame(dict_metrix)
+        df_metrix.to_csv(output_dir.joinpath('metrix.csv'),index=False)
         joblib.dump(dictionary, output_dir.joinpath('dictionary_model.pkl'))
 
     else:
@@ -172,60 +205,55 @@ def main(arg_dict:dict):
         raise ValueError('Errorcode : 1')
 
 
-    # 検証フェイズ
-    val_dataloader = DataLoader(val_dataset, batch_size=1, shuffle=False)
-    image_preds = []
-    pixel_preds = []
-    image_labels = []
-    pixel_labels = []
+    
 
-    for i, (images, mask, label) in tqdm(enumerate(val_dataloader),total=len(val_dataloader)):
-        # 特徴マップの抽出
-        feature_map = extracter.extract_feature_map(images)
-        feature_map_np = feature_map.detach().numpy().astype(np.float64)
+    # for i, (images, mask, label) in tqdm(enumerate(val_dataloader),total=len(val_dataloader)):
+    #     # 特徴マップの抽出
+    #     feature_map = extracter.extract_feature_map(images)
+    #     feature_map_np = feature_map.detach().numpy().astype(np.float64)
 
-        # パッチ抽出
-        # patches = extract_patches_2d(feature_map_np, patch_size)
+    #     # パッチ抽出
+    #     # patches = extract_patches_2d(feature_map_np, patch_size)
 
-        # スパース表現
-        sparse_codes = dictionary.transform(feature_map_np)
+    #     # スパース表現
+    #     sparse_codes = dictionary.transform(feature_map_np)
 
-        # 再構成
-        reconstructed_patches = np.dot(sparse_codes, dictionary.components_)
+    #     # 再構成
+    #     reconstructed_patches = np.dot(sparse_codes, dictionary.components_)
 
-        anomaly_vec = np.mean(np.sqrt((feature_map_np - reconstructed_patches)**2),axis=1)
+    #     anomaly_vec = np.mean(np.sqrt((feature_map_np - reconstructed_patches)**2),axis=1)
 
-        map_shape = int(np.sqrt(anomaly_vec.shape[0]))
-        anomaly_map = anomaly_vec.reshape(map_shape,map_shape)
-        anomaly_map = cv2.resize(anomaly_map,(arg_dict['size'],arg_dict['size']),cv2.INTER_LINEAR)
+    #     map_shape = int(np.sqrt(anomaly_vec.shape[0]))
+    #     anomaly_map = anomaly_vec.reshape(map_shape,map_shape)
+    #     anomaly_map = cv2.resize(anomaly_map,(arg_dict['size'],arg_dict['size']),cv2.INTER_LINEAR)
 
 
 
-        image_preds.append(np.max(anomaly_map))
-        pixel_preds.extend(anomaly_map.flatten())
+    #     image_preds.append(np.max(anomaly_map))
+    #     pixel_preds.extend(anomaly_map.flatten())
         
-        image_labels.append(label)
-        pixel_labels.extend(mask.flatten().numpy())
+    #     image_labels.append(label)
+    #     pixel_labels.extend(mask.flatten().numpy())
 
 
-        # 誤差マップの保存
-        org_imgname = Path(val_dataset.imgs[i][0])
-        img = Image.open(org_imgname)
-        img = img.resize((pre_resize, pre_resize))
-        crop = transforms.CenterCrop(arg_dict['size'])
-        img = crop.forward(img)
-        # save_error_map(img,feature_map_np, reconstructed_feature_map,os.path.join(output_dir,f"error_map_{i * batch_size + j}.png"))
-        save_anomaly_map(img, anomaly_map, os.path.join(output_dir,f'{org_imgname.parts[-2]}_{org_imgname.name}'),alpha=0.3)
+    #     # 誤差マップの保存
+    #     org_imgname = Path(val_dataset.imgs[i][0])
+    #     img = Image.open(org_imgname)
+    #     img = img.resize((pre_resize, pre_resize))
+    #     crop = transforms.CenterCrop(arg_dict['size'])
+    #     img = crop.forward(img)
+    #     # save_error_map(img,feature_map_np, reconstructed_feature_map,os.path.join(output_dir,f"error_map_{i * batch_size + j}.png"))
+    #     save_anomaly_map(img, anomaly_map, os.path.join(output_dir,f'{org_imgname.parts[-2]}_{org_imgname.name}'),alpha=0.3)
 
-    image_labels = np.stack(image_labels)
-    image_preds = np.stack(image_preds)
+    # image_labels = np.stack(image_labels)
+    # image_preds = np.stack(image_preds)
 
-    image_rocauc = roc_auc_score(image_labels, image_preds)
-    pixel_rocauc = roc_auc_score(pixel_labels, pixel_preds)
+    # image_rocauc = roc_auc_score(image_labels, image_preds)
+    # pixel_rocauc = roc_auc_score(pixel_labels, pixel_preds)
 
-    with open(output_dir.joinpath('metrix.txt'),'w') as file, redirect_stdout(file):
-        print('Image ROC AUC:',image_rocauc)
-        print('Pixel ROC AUC:', pixel_rocauc)
+    # with open(output_dir.joinpath('metrix.txt'),'w') as file, redirect_stdout(file):
+    #     print('Image ROC AUC:',image_rocauc)
+    #     print('Pixel ROC AUC:', pixel_rocauc)
 
 
 def parse_arguments():
